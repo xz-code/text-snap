@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>text-snap 设置</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #f7f8fa;
+      --line: #e3e6ec;
+      --text: #1b1f27;
+      --muted: #6b7280;
+      --accent: #1d4ed8;
+      --accent-ink: #1741b6;
+      --danger: #b42318;
+      --ok-ink: #067647;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.6 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+
+    main {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 18px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+
+    .label { font-weight: 500; }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 18px;
+    }
+
+    .hint.bad { color: var(--danger); }
+    .hint.ok { color: var(--ok-ink); }
+
+    /* 快捷键录制框 */
+    .hotkey {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px 12px;
+      font: 13px/1 "Cascadia Mono", "Consolas", monospace;
+      text-align: center;
+      cursor: pointer;
+      user-select: none;
+      outline: none;
+    }
+
+    .hotkey:focus,
+    .hotkey.recording {
+      border-color: var(--accent);
+      background: #eef2ff;
+      color: var(--accent-ink);
+    }
+
+    .row { display: flex; gap: 8px; }
+
+    input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: 12.5px/1.5 "Cascadia Mono", "Consolas", monospace;
+      padding: 7px 10px;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      padding: 7px 14px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) { background: #f2f4f7; }
+
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    button.primary:hover:not(:disabled) { background: var(--accent-ink); }
+
+    .divider { height: 1px; background: var(--line); }
+
+    footer {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px 16px;
+      border-top: 1px solid var(--line);
+    }
+
+    footer .status {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    footer .status.bad { color: var(--danger); }
+    footer .status.ok { color: var(--ok-ink); }
+
+    .path-note { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <div class="field">
+      <div class="label">全局快捷键</div>
+      <div class="hotkey" id="hotkey" tabindex="0" title="点这里，然后直接按你想用的组合键；Esc 取消">
+        读取中…
+      </div>
+      <div class="hint" id="hotkey-hint">
+        点上面的框，直接按组合键。至少要有一个修饰键（Ctrl / Shift / Alt / Win）。
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="field">
+      <div class="label">保存目录</div>
+      <div class="row">
+        <input type="text" id="dir" placeholder="留空 = 用「文档\text-snap」" spellcheck="false" />
+        <button id="browse">浏览…</button>
+        <button id="open">打开</button>
+        <button id="reset">恢复默认</button>
+      </div>
+      <div class="path-note" id="dir-note"></div>
+    </div>
+  </main>
+
+  <footer>
+    <span class="status" id="status"></span>
+    <button class="primary" id="save">保存并应用</button>
+  </footer>
+
+  <script>
+    (function () {
+      const tauri = window.__TAURI__;
+      const $ = (id) => document.getElementById(id);
+
+      if (!tauri) {
+        $('status').textContent = '没有检测到 Tauri 运行时';
+        return;
+      }
+      const invoke = tauri.core.invoke;
+
+      const MODIFIER_CODES = [
+        'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+        'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+      ];
+
+      const NAMED_CODES = {
+        Space: 'Space', Enter: 'Enter', Tab: 'Tab',
+        Minus: 'Minus', Equal: 'Equal', Comma: 'Comma', Period: 'Period',
+        Slash: 'Slash', Semicolon: 'Semicolon', Quote: 'Quote',
+        Backquote: 'Backquote', BracketLeft: 'BracketLeft', BracketRight: 'BracketRight',
+      };
+
+      let saved = null;       // 服务端当前的配置
+      let draft = null;       // 本次录制出来的快捷键；null = 没改过
+      let recording = false;
+
+      // ── 把 JS 的物理键位码翻成后端认的按键名 ──────────────────
+      function codeToName(code) {
+        if (code.startsWith('Key')) return code.slice(3);          // KeyA -> A
+        if (code.startsWith('Digit')) return code.slice(5);        // Digit1 -> 1
+        if (/^F([1-9]|1[0-2])$/.test(code)) return code;           // F1..F12
+        if (NAMED_CODES[code]) return NAMED_CODES[code];
+        return null;                                               // 小键盘、媒体键等暂不支持
+      }
+
+      function setHint(text, kind) {
+        const el = $('hotkey-hint');
+        el.textContent = text || '点上面的框，直接按组合键。至少要有一个修饰键（Ctrl / Shift / Alt / Win）。';
+        el.className = 'hint' + (kind ? ' ' + kind : '');
+      }
+
+      function setStatus(text, kind) {
+        const el = $('status');
+        el.textContent = text || '';
+        el.className = 'status' + (kind ? ' ' + kind : '');
+      }
+
+      function renderHotkey() {
+        const value = draft || (saved ? saved.hotkey : '');
+        $('hotkey').textContent = value || '点击后按键';
+      }
+
+      function renderDir(info) {
+        const input = $('dir');
+        if (document.activeElement !== input) {
+          input.value = info.save_dir_raw || '';
+        }
+        input.placeholder = info.save_dir_custom
+          ? '留空 = 用「文档\\text-snap」'
+          : info.save_dir;
+
+        const note = $('dir-note');
+        if (!info.save_dir_custom) {
+          note.textContent = '当前用默认目录：' + info.save_dir;
+        } else if (info.save_dir_exists) {
+          note.textContent = '当前目录：' + info.save_dir + '（已存在）';
+        } else {
+          note.textContent = '当前目录：' + info.save_dir + '（还不存在，首次保存时会自动创建）';
+        }
+      }
+
+      function apply(info) {
+        saved = info;
+        draft = null;
+        renderHotkey();
+        renderDir(info);
+      }
+
+      // ── 快捷键录制 ─────────────────────────────────────────
+      const hotkeyEl = $('hotkey');
+
+      hotkeyEl.addEventListener('focus', function () {
+        recording = true;
+        hotkeyEl.classList.add('recording');
+        hotkeyEl.textContent = '按下组合键…';
+        setHint('');
+      });
+
+      hotkeyEl.addEventListener('blur', function () {
+        recording = false;
+        hotkeyEl.classList.remove('recording');
+        renderHotkey();
+      });
+
+      hotkeyEl.addEventListener('keydown', function (event) {
+        if (!recording) return;
+        event.preventDefault();
+
+        // Esc 用来取消录制，不当快捷键用
+        if (event.code === 'Escape') {
+          hotkeyEl.blur();
+          return;
+        }
+
+        const mods = [];
+        if (event.ctrlKey) mods.push('Ctrl');
+        if (event.shiftKey) mods.push('Shift');
+        if (event.altKey) mods.push('Alt');
+        if (event.metaKey) mods.push('Win');
+
+        // 只按了修饰键：先显示出来，等主键
+        if (MODIFIER_CODES.indexOf(event.code) !== -1) {
+          hotkeyEl.textContent = mods.length ? mods.join('+') + '+…' : '按下组合键…';
+          setHint('');
+          return;
+        }
+
+        const name = codeToName(event.code);
+        if (!name) {
+          setHint('这个键不支持做快捷键（小键盘、媒体键等暂不支持）', 'bad');
+          return;
+        }
+        if (mods.length === 0) {
+          setHint('至少要有一个修饰键：Ctrl / Shift / Alt / Win', 'bad');
+          return;
+        }
+
+        draft = mods.join('+') + '+' + name;
+        hotkeyEl.textContent = draft;
+        setHint('按「保存并应用」生效。再点一下可以重录。');
+      });
+
+      // ── 目录相关 ───────────────────────────────────────────
+      $('browse').addEventListener('click', async function () {
+        try {
+          const picked = await invoke('pick_folder');
+          if (picked) {
+            $('dir').value = picked;
+            setStatus('已选中目录，别忘了点「保存并应用」', '');
+          }
+        } catch (err) {
+          setStatus('打开文件夹选择框失败：' + err, 'bad');
+        }
+      });
+
+      $('open').addEventListener('click', async function () {
+        const value = $('dir').value.trim() || (saved ? saved.save_dir : '');
+        if (!value) return;
+        try {
+          await invoke('open_dir', { path: value });
+        } catch (err) {
+          setStatus(String(err), 'bad');
+        }
+      });
+
+      $('reset').addEventListener('click', function () {
+        $('dir').value = '';
+        setStatus('已清空，点「保存并应用」后回到默认目录', '');
+      });
+
+      // ── 保存 ───────────────────────────────────────────────
+      $('save').addEventListener('click', async function () {
+        const hotkey = draft || (saved ? saved.hotkey : '');
+        const dir = $('dir').value;
+
+        $('save').disabled = true;
+        setStatus('正在应用…', '');
+        try {
+          const info = await invoke('apply_settings', { hotkey: hotkey, saveDir: dir });
+          apply(info);
+          setStatus('已保存并生效', 'ok');
+        } catch (err) {
+          setStatus(String(err), 'bad');
+        } finally {
+          $('save').disabled = false;
+        }
+      });
+
+      (async function boot() {
+        try {
+          apply(await invoke('ui_info'));
+        } catch (err) {
+          setStatus('读取当前配置失败：' + err, 'bad');
+        }
+      })();
+    })();
+  </script>
+</body>
+
+</html>

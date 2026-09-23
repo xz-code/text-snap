@@ -1,0 +1,8 @@
+# 统一以 LF 入库，避免 Windows / macOS / Linux 之间产生无意义的整文件 diff
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.ico binary
+*.png binary
+*.icns binary
+*.exe binary

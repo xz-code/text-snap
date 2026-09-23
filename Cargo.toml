@@ -1,0 +1,54 @@
+[package]
+name = "text-snap"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Read the selected text of the focused window on Windows via UI Automation. No clipboard involved."
+authors = ["xz-code"]
+license = "MIT"
+repository = "https://github.com/xz-code/text-snap"
+keywords = ["windows", "uiautomation", "tauri", "accessibility", "desktop"]
+categories = ["gui", "os::windows-apis"]
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+uiautomation = "0.25"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# MVP2 才会用到（DeepSeek 在线 API）。默认不编译，加 --features ai 即可启用。
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+    "charset",
+    "http2",
+], optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+ai = ["dep:reqwest"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[[bin]]
+name = "text-snap"
+path = "src/main.rs"

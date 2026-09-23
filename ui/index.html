@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>text-snap</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #f7f8fa;
+      --line: #e3e6ec;
+      --text: #1b1f27;
+      --muted: #6b7280;
+      --accent: #1d4ed8;
+      --accent-ink: #1741b6;
+      --danger: #b42318;
+      --danger-bg: #fef3f2;
+      --ok-bg: #ecfdf3;
+      --ok-ink: #067647;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.6 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); }
+
+    header {
+      flex: 0 0 auto;
+      height: 42px;
+      padding: 0 8px 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #fbfbfd;
+      border-bottom: 1px solid var(--line);
+      user-select: none;
+    }
+
+    header .name { font-weight: 500; letter-spacing: .2px; }
+
+    header .src {
+      flex: 1;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    kbd {
+      font: 11px/1 "Consolas", monospace;
+      color: var(--accent-ink);
+      background: #eef2ff;
+      border: 1px solid #dbe3fb;
+      border-radius: 5px;
+      padding: 4px 6px;
+      white-space: nowrap;
+    }
+
+    .icon-btn {
+      flex: 0 0 auto;
+      width: 26px;
+      height: 26px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+    }
+
+    .icon-btn:hover { background: #eef0f4; color: var(--text); }
+
+    main {
+      flex: 1;
+      min-height: 0;
+      padding: 10px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .card {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card.grow { flex: 1; }
+
+    .card .head {
+      flex: 0 0 auto;
+      padding: 7px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 500;
+      color: #3b4252;
+    }
+
+    .card .head .tag {
+      font-weight: 400;
+      font-size: 11px;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px 8px;
+      background: #fff;
+    }
+
+    .text {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 10px 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 12.5px/1.75 "Cascadia Mono", "Consolas", monospace;
+      user-select: text;
+    }
+
+    .error {
+      flex: 0 0 auto;
+      border: 1px solid #fecdca;
+      border-radius: 10px;
+      background: var(--danger-bg);
+      color: var(--danger);
+      padding: 10px 12px;
+      font-size: 12.5px;
+      white-space: pre-wrap;
+    }
+
+    .bar {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 30px;
+    }
+
+    button.primary {
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      padding: 6px 14px;
+      cursor: pointer;
+    }
+
+    button.primary:hover:not(:disabled) { background: var(--accent-ink); }
+
+    button.primary:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
+    button.ghost {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      padding: 6px 14px;
+      cursor: pointer;
+    }
+
+    button.ghost:hover:not(:disabled) { background: #f2f4f7; }
+
+    button.ghost:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
+    .head-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .copied {
+      font-weight: 400;
+      font-size: 11px;
+      color: var(--ok-ink);
+      background: var(--ok-bg);
+      border: 1px solid #abefc6;
+      border-radius: 999px;
+      padding: 1px 8px;
+      white-space: nowrap;
+    }
+
+    .toast {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .toast.ok { color: var(--ok-ink); }
+    .toast.bad { color: var(--danger); }
+
+    .mvp2 { flex: 0 0 auto; }
+
+    .mvp2 p {
+      margin: 0;
+      padding: 9px 12px 11px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    footer {
+      flex: 0 0 auto;
+      padding: 0 12px 10px;
+      font-size: 11px;
+      color: #9aa1ad;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+</head>
+
+<body>
+  <header data-tauri-drag-region>
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <rect width="16" height="16" rx="4" fill="#1d4ed8" />
+      <rect x="3.6" y="4.6" width="8.8" height="1.5" rx=".75" fill="#fff" />
+      <rect x="3.6" y="7.2" width="8.8" height="1.5" rx=".75" fill="#fcd34d" />
+      <rect x="3.6" y="9.8" width="5.4" height="1.5" rx=".75" fill="#fff" />
+    </svg>
+    <span class="name">text-snap</span>
+    <span class="src" id="src">等待划词…</span>
+    <kbd id="hotkey">Ctrl+Shift+A</kbd>
+    <button class="icon-btn" id="close" title="收起 (Esc)">
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <path d="M2 2L10 10M10 2L2 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+      </svg>
+    </button>
+  </header>
+
+  <main>
+    <section class="card grow" id="card">
+      <div class="head">
+        <span>选中的原文</span>
+        <span class="head-right">
+          <span class="copied hidden" id="copied">已复制到剪贴板</span>
+          <span class="muted" id="len"></span>
+        </span>
+      </div>
+      <pre class="text" id="text"></pre>
+    </section>
+
+    <div class="error hidden" id="error"></div>
+
+    <div class="bar">
+      <button class="primary" id="copy" disabled>复制到剪贴板</button>
+      <button class="ghost" id="save" disabled>保存到本地 txt</button>
+      <span class="toast" id="toast"></span>
+    </div>
+
+    <section class="card mvp2">
+      <div class="head">
+        <span>AI 对话</span>
+        <span class="tag">MVP2 · DeepSeek</span>
+      </div>
+      <p>下一阶段接入 DeepSeek 在线 API，把上面的原文发给大模型做总结 / 翻译 / 代码解释，结果可另存为 markdown。</p>
+    </section>
+  </main>
+
+  <footer id="foot"></footer>
+
+  <script>
+    (function () {
+      const tauri = window.__TAURI__;
+      if (!tauri) {
+        document.getElementById('src').textContent = '没有检测到 Tauri 运行时';
+        return;
+      }
+      const invoke = tauri.core.invoke;
+      const $ = (id) => document.getElementById(id);
+
+      // 把进程名换成好认的名字，方便一眼确认内容来自哪
+      const APP_NAMES = {
+        'Code.exe': 'Visual Studio Code',
+        'Code - Insiders.exe': 'VS Code Insiders',
+        'devenv.exe': 'Visual Studio',
+      };
+
+      let currentText = '';
+
+      function describe(payload) {
+        const app = APP_NAMES[payload.process] || payload.process || '未知程序';
+        return payload.control ? app + ' · ' + payload.control : app;
+      }
+
+      function setToast(message, kind) {
+        const el = $('toast');
+        el.textContent = message || '';
+        el.className = 'toast' + (kind ? ' ' + kind : '');
+      }
+
+      function render(frame) {
+        if (!frame) return;
+        const payload = frame.payload || {};
+        const ok = frame.event === 'ready';
+
+        $('src').textContent = describe(payload);
+        $('card').classList.toggle('hidden', !ok);
+        $('error').classList.toggle('hidden', ok);
+        $('save').disabled = !ok;
+        $('copy').disabled = !ok;
+        setToast('');
+
+        if (ok) {
+          currentText = payload.text || '';
+          $('text').textContent = currentText;
+          $('len').textContent = currentText.length + ' 字';
+          $('text').scrollTop = 0;
+          // Rust 侧在弹窗出现前已经把原文写进剪贴板了，这里明示一下，别让用户靠猜
+          $('copied').classList.toggle('hidden', !frame.auto_copied);
+        } else {
+          currentText = '';
+          $('error').textContent = payload.message || '读取失败';
+          $('copied').classList.add('hidden');
+        }
+      }
+
+      $('copy').addEventListener('click', async function () {
+        if (!currentText) return;
+        try {
+          await invoke('copy_text', { content: currentText });
+          $('copied').classList.remove('hidden');
+          setToast('已复制到剪贴板，可以 Ctrl+V 了', 'ok');
+        } catch (err) {
+          setToast('复制失败：' + err, 'bad');
+        }
+      });
+
+      $('save').addEventListener('click', async function () {
+        if (!currentText) return;
+        $('save').disabled = true;
+        try {
+          const path = await invoke('save_text', { content: currentText, kind: 'txt' });
+          setToast('已保存 ' + path, 'ok');
+        } catch (err) {
+          setToast('保存失败：' + err, 'bad');
+        } finally {
+          $('save').disabled = false;
+        }
+      });
+
+      $('close').addEventListener('click', function () {
+        invoke('hide_popup');
+      });
+
+      window.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') invoke('hide_popup');
+      });
+
+      // 主键交给 Rust：Rust 会在显示前把结果推过来，这里只负责渲染
+      tauri.event.listen('selection://update', function (event) {
+        render(event.payload);
+      });
+
+      // 设置在设置窗口里改完后，这里显示的快捷键和保存目录也要跟着更新
+      tauri.event.listen('settings://applied', function (event) {
+        const info = event.payload || {};
+        if (info.hotkey) $('hotkey').textContent = info.hotkey;
+        if (info.save_dir) $('foot').textContent = '保存目录：' + info.save_dir;
+      });
+
+      (async function boot() {
+        try {
+          const info = await invoke('ui_info');
+          $('hotkey').textContent = info.hotkey;
+          $('foot').textContent = '保存目录：' + info.save_dir;
+        } catch (err) { /* 拿不到就保留默认展示 */ }
+        try {
+          render(await invoke('last_selection'));
+        } catch (err) { /* 还没有读过，正常 */ }
+      })();
+    })();
+  </script>
+</body>
+
+</html>
