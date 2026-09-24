@@ -38,12 +38,24 @@
       padding: 16px 18px 8px;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 16px;
     }
 
-    .field { display: flex; flex-direction: column; gap: 6px; }
-
     .label { font-weight: 500; }
+
+    /* 两列网格：左列是说明文字（右对齐），右列是控件 —— 仿 Snipaste 的设置版式 */
+    .grid {
+      display: grid;
+      grid-template-columns: max-content minmax(0, 1fr);
+      gap: 10px 12px;
+      align-items: center;
+    }
+
+    .grid > .k {
+      text-align: right;
+      white-space: nowrap;
+      color: var(--text);
+    }
 
     .hint {
       font-size: 12px;
@@ -59,7 +71,7 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
-      padding: 10px 12px;
+      padding: 9px 12px;
       font: 13px/1 "Cascadia Mono", "Consolas", monospace;
       text-align: center;
       cursor: pointer;
@@ -73,6 +85,8 @@
       background: #eef2ff;
       color: var(--accent-ink);
     }
+
+    .hotkey.empty { color: var(--muted); font-style: italic; }
 
     .row { display: flex; gap: 8px; }
 
@@ -104,7 +118,6 @@
     }
 
     button:hover:not(:disabled) { background: #f2f4f7; }
-
     button:disabled { opacity: .45; cursor: not-allowed; }
 
     button.primary {
@@ -116,6 +129,16 @@
     button.primary:hover:not(:disabled) { background: var(--accent-ink); }
 
     .divider { height: 1px; background: var(--line); }
+
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
 
     footer {
       flex: 0 0 auto;
@@ -143,27 +166,48 @@
 
 <body>
   <main>
-    <div class="field">
-      <div class="label">全局快捷键</div>
-      <div class="hotkey" id="hotkey" tabindex="0" title="点这里，然后直接按你想用的组合键；Esc 取消">
-        读取中…
+    <div>
+      <div class="label" style="margin-bottom: 8px;">快捷键</div>
+      <div class="grid">
+        <div class="k">读取选中文本:</div>
+        <div class="hotkey" id="hk-read" tabindex="0" title="点这里，然后直接按你想用的组合键；Esc 取消"></div>
+
+        <div class="k">最小化/还原编辑器:</div>
+        <div class="hotkey" id="hk-min" tabindex="0" title="点这里，然后直接按你想用的组合键；Esc 取消"></div>
       </div>
-      <div class="hint" id="hotkey-hint">
-        点上面的框，直接按组合键。至少要有一个修饰键（Ctrl / Shift / Alt / Win）。
+      <div class="hint" id="hotkey-hint" style="margin-top: 8px;">
+        点框后直接按组合键。至少一个修饰键（Ctrl / Shift / Alt / Win）。
+        按 <b>Backspace</b> 清空第二项 = 不注册快捷键（仍可用托盘菜单）。
       </div>
     </div>
 
     <div class="divider"></div>
 
-    <div class="field">
-      <div class="label">保存目录</div>
-      <div class="row">
-        <input type="text" id="dir" placeholder="留空 = 用「文档\text-snap」" spellcheck="false" />
-        <button id="browse">浏览…</button>
-        <button id="open">打开</button>
-        <button id="reset">恢复默认</button>
+    <div>
+      <div class="label" style="margin-bottom: 8px;">保存</div>
+      <div class="grid">
+        <div class="k">保存目录:</div>
+        <div class="row">
+          <input type="text" id="dir" placeholder="留空 = 用「文档\text-snap」" spellcheck="false" />
+          <button id="browse">浏览…</button>
+          <button id="open">打开</button>
+          <button id="reset">恢复默认</button>
+        </div>
       </div>
-      <div class="path-note" id="dir-note"></div>
+      <div class="path-note" id="dir-note" style="margin-top: 6px;"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div>
+      <div class="label" style="margin-bottom: 8px;">启动</div>
+      <div class="grid">
+        <div class="k">启动提示:</div>
+        <label class="check">
+          <input type="checkbox" id="toast" />
+          <span>每次启动时发一条系统通知，提示程序已在后台运行</span>
+        </label>
+      </div>
     </div>
   </main>
 
@@ -195,9 +239,14 @@
         Backquote: 'Backquote', BracketLeft: 'BracketLeft', BracketRight: 'BracketRight',
       };
 
-      let saved = null;       // 服务端当前的配置
-      let draft = null;       // 本次录制出来的快捷键；null = 没改过
-      let recording = false;
+      const DEFAULT_HINT =
+        '点框后直接按组合键。至少一个修饰键（Ctrl / Shift / Alt / Win）。' +
+        '按 Backspace 清空第二项 = 不注册快捷键（仍可用托盘菜单）。';
+
+      let saved = null;        // 服务端当前配置
+      let draftRead = null;    // null = 没改过
+      let draftMin = null;
+      const hintEl = $('hotkey-hint');
 
       // ── 把 JS 的物理键位码翻成后端认的按键名 ──────────────────
       function codeToName(code) {
@@ -209,9 +258,8 @@
       }
 
       function setHint(text, kind) {
-        const el = $('hotkey-hint');
-        el.textContent = text || '点上面的框，直接按组合键。至少要有一个修饰键（Ctrl / Shift / Alt / Win）。';
-        el.className = 'hint' + (kind ? ' ' + kind : '');
+        hintEl.innerHTML = text || DEFAULT_HINT;
+        hintEl.className = 'hint' + (kind ? ' ' + kind : '');
       }
 
       function setStatus(text, kind) {
@@ -220,10 +268,81 @@
         el.className = 'status' + (kind ? ' ' + kind : '');
       }
 
-      function renderHotkey() {
-        const value = draft || (saved ? saved.hotkey : '');
-        $('hotkey').textContent = value || '点击后按键';
+      // ── 录制框：两个框共用同一套逻辑 ──────────────────────────
+      // getValue 读当前值，setValue 写入草稿，paint 负责回显
+      function createRecorder(el, getValue, setValue) {
+        let recording = false;
+
+        function paint() {
+          const value = getValue();
+          el.textContent = value || '未设置（点击后按键）';
+          el.classList.toggle('empty', !value);
+        }
+
+        el.addEventListener('focus', function () {
+          recording = true;
+          el.classList.add('recording');
+          el.classList.remove('empty');
+          el.textContent = '按下组合键…';
+          setHint('按 <b>Backspace</b> 清空这一项；<b>Esc</b> 取消录制。');
+        });
+
+        el.addEventListener('blur', function () {
+          recording = false;
+          el.classList.remove('recording');
+          paint();
+        });
+
+        el.addEventListener('keydown', function (event) {
+          if (!recording) return;
+          event.preventDefault();
+
+          if (event.code === 'Escape') { el.blur(); return; }
+
+          // 清空 = 不注册（只有第二项有意义，第一项清空后端会报错拦住）
+          if (event.code === 'Backspace' || event.code === 'Delete') {
+            setValue('');
+            el.blur();
+            setHint('已清空，按「保存并应用」生效。');
+            return;
+          }
+
+          const mods = [];
+          if (event.ctrlKey) mods.push('Ctrl');
+          if (event.shiftKey) mods.push('Shift');
+          if (event.altKey) mods.push('Alt');
+          if (event.metaKey) mods.push('Win');
+
+          // 只按了修饰键：先显示出来，等主键
+          if (MODIFIER_CODES.indexOf(event.code) !== -1) {
+            el.textContent = mods.length ? mods.join('+') + '+…' : '按下组合键…';
+            return;
+          }
+
+          const name = codeToName(event.code);
+          if (!name) {
+            setHint('这个键不支持做快捷键（小键盘、媒体键等暂不支持）', 'bad');
+            return;
+          }
+          if (mods.length === 0) {
+            setHint('至少要有一个修饰键：Ctrl / Shift / Alt / Win', 'bad');
+            return;
+          }
+
+          setValue(mods.join('+') + '+' + name);
+          el.blur();
+          setHint('按「保存并应用」生效。再点一下可以重录。');
+        });
+
+        paint();
+        return { paint: paint };
       }
+
+      const readValue = () => (draftRead !== null ? draftRead : (saved ? saved.hotkey : ''));
+      const minValue = () => (draftMin !== null ? draftMin : (saved ? saved.minimize_hotkey : ''));
+
+      createRecorder($('hk-read'), readValue, (v) => { draftRead = v; });
+      createRecorder($('hk-min'), minValue, (v) => { draftMin = v; });
 
       function renderDir(info) {
         const input = $('dir');
@@ -246,64 +365,15 @@
 
       function apply(info) {
         saved = info;
-        draft = null;
-        renderHotkey();
+        draftRead = null;
+        draftMin = null;
+        $('hk-read').textContent = info.hotkey || '未设置（点击后按键）';
+        $('hk-min').textContent = info.minimize_hotkey || '未设置（点击后按键）';
+        $('hk-read').classList.toggle('empty', !info.hotkey);
+        $('hk-min').classList.toggle('empty', !info.minimize_hotkey);
+        $('toast').checked = !!info.show_startup_toast;
         renderDir(info);
       }
-
-      // ── 快捷键录制 ─────────────────────────────────────────
-      const hotkeyEl = $('hotkey');
-
-      hotkeyEl.addEventListener('focus', function () {
-        recording = true;
-        hotkeyEl.classList.add('recording');
-        hotkeyEl.textContent = '按下组合键…';
-        setHint('');
-      });
-
-      hotkeyEl.addEventListener('blur', function () {
-        recording = false;
-        hotkeyEl.classList.remove('recording');
-        renderHotkey();
-      });
-
-      hotkeyEl.addEventListener('keydown', function (event) {
-        if (!recording) return;
-        event.preventDefault();
-
-        // Esc 用来取消录制，不当快捷键用
-        if (event.code === 'Escape') {
-          hotkeyEl.blur();
-          return;
-        }
-
-        const mods = [];
-        if (event.ctrlKey) mods.push('Ctrl');
-        if (event.shiftKey) mods.push('Shift');
-        if (event.altKey) mods.push('Alt');
-        if (event.metaKey) mods.push('Win');
-
-        // 只按了修饰键：先显示出来，等主键
-        if (MODIFIER_CODES.indexOf(event.code) !== -1) {
-          hotkeyEl.textContent = mods.length ? mods.join('+') + '+…' : '按下组合键…';
-          setHint('');
-          return;
-        }
-
-        const name = codeToName(event.code);
-        if (!name) {
-          setHint('这个键不支持做快捷键（小键盘、媒体键等暂不支持）', 'bad');
-          return;
-        }
-        if (mods.length === 0) {
-          setHint('至少要有一个修饰键：Ctrl / Shift / Alt / Win', 'bad');
-          return;
-        }
-
-        draft = mods.join('+') + '+' + name;
-        hotkeyEl.textContent = draft;
-        setHint('按「保存并应用」生效。再点一下可以重录。');
-      });
 
       // ── 目录相关 ───────────────────────────────────────────
       $('browse').addEventListener('click', async function () {
@@ -335,13 +405,15 @@
 
       // ── 保存 ───────────────────────────────────────────────
       $('save').addEventListener('click', async function () {
-        const hotkey = draft || (saved ? saved.hotkey : '');
-        const dir = $('dir').value;
-
         $('save').disabled = true;
         setStatus('正在应用…', '');
         try {
-          const info = await invoke('apply_settings', { hotkey: hotkey, saveDir: dir });
+          const info = await invoke('apply_settings', {
+            hotkey: readValue(),
+            minimizeHotkey: minValue(),
+            saveDir: $('dir').value,
+            showStartupToast: $('toast').checked,
+          });
           apply(info);
           setStatus('已保存并生效', 'ok');
         } catch (err) {

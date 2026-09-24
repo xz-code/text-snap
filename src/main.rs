@@ -15,7 +15,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod minimize;
 mod selection;
+mod toast;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,7 +33,7 @@ use tauri::{
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_global_shortcut::{
-    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutEvent, ShortcutState,
+    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
 };
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -77,11 +79,17 @@ fn main() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(on_hotkey)
-                .build(),
-        )
+        // ⚠️ 这里**故意不调 `.with_handler()`**。
+        //
+        // 插件文档写着 with_handler 的 handler 会 "be triggered for any and all shortcuts"，
+        // 而分发逻辑里它是**无条件再调一次**，不是"没有专属 handler 时才兜底"：
+        //
+        //     if let Some(h) = &shortcut.handler { h(...) }   // 按键专属
+        //     if let Some(h) = &handler         { h(...) }   // 全局：又一次
+        //
+        // 两条键都用 on_shortcut 各挂各的，全局 handler 留空，
+        // 才不会出现"按最小化键结果也触发了一次读取"这种事。
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             hide_popup,
             copy_text,
@@ -91,7 +99,8 @@ fn main() {
             open_settings,
             apply_settings,
             pick_folder,
-            open_dir
+            open_dir,
+            hide_toast
         ])
         .setup(setup)
         .on_window_event(on_window_event)
@@ -159,22 +168,39 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     build_tray(&handle)?;
 
     // ④ 全局快捷键
-    match register_hotkey(&handle, &cfg.hotkey) {
-        Ok(shortcut) => log_line(&format!("全局快捷键已注册：{shortcut:?}")),
-        Err(err) => log_line(&format!("快捷键 [{}] 注册失败：{err}", cfg.hotkey)),
+    match register_shortcuts(&handle, &cfg) {
+        Ok(()) => log_line(&format!(
+            "全局快捷键已注册：读取 [{}]，最小化/还原 [{}]",
+            cfg.hotkey,
+            cfg.minimize_spec().unwrap_or("未设置")
+        )),
+        Err(err) => log_line(&format!("快捷键注册失败：{err}")),
+    }
+
+    // ⑤ 通知窗口 + 启动提示
+    //
+    // create 必须先于 show_startup：窗口先存在，后台的显示线程才有东西可显示。
+    // （之前两步顺序是反的，靠线程里 sleep 600ms 隐式保证 —— 已改为显式顺序。）
+    if let Err(err) = toast::create(&handle) {
+        log_line(&format!(
+            "创建通知窗口失败：{err}（本次运行不显示启动提示，其余功能不受影响）"
+        ));
+    } else if cfg.show_startup_toast {
+        toast::show_startup(&handle, &cfg.hotkey);
     }
 
     Ok(())
 }
 
-// ─────────────────────── 全局快捷键 ───────────────────────
-
-fn on_hotkey(app: &AppHandle, _shortcut: &Shortcut, event: ShortcutEvent) {
-    if event.state() != ShortcutState::Pressed {
-        return;
+/// 收起启动提示窗口。`toast.html` 的关闭按钮会调它。
+#[tauri::command]
+fn hide_toast(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(toast::TOAST_LABEL) {
+        let _ = window.hide();
     }
-    trigger_read(app);
 }
+
+// ─────────────────────── 全局快捷键 ───────────────────────
 
 /// 往工作线程投递一次读取请求。
 fn trigger_read(app: &AppHandle) {
@@ -185,10 +211,73 @@ fn trigger_read(app: &AppHandle) {
     }
 }
 
-fn register_hotkey(app: &AppHandle, spec: &str) -> anyhow::Result<Shortcut> {
-    let shortcut = parse_shortcut(spec)?;
-    app.global_shortcut().register(shortcut)?;
-    Ok(shortcut)
+/// 最小化 ⇄ 还原编辑器，并写日志。托盘菜单和全局快捷键共用这一条路径。
+fn toggle_editors() {
+    let result = minimize::toggle();
+
+    match result.action {
+        minimize::Action::Nothing => {
+            log_line("没有检测到 VS Code / Visual Studio 窗口");
+            return;
+        }
+        _ => {}
+    }
+
+    let what = match result.action {
+        minimize::Action::Minimized => "已最小化",
+        minimize::Action::Restored => "已还原",
+        _ => return,
+    };
+
+    // UIPI 拦截不会报错，只能靠复核发现 —— 这条日志是排障的关键线索
+    let suffix = if result.failed > 0 {
+        format!(
+            "（{}/{} 个没成功：目标程序可能以管理员运行，本程序也需要管理员权限才能控制它）",
+            result.failed, result.count
+        )
+    } else {
+        String::new()
+    };
+
+    log_line(&format!(
+        "{} {} 个编辑器窗口{}",
+        what, result.count, suffix
+    ));
+}
+
+/// 按配置注册全部全局快捷键。**任何一步失败都返回错误，由调用方负责回滚。**
+///
+/// 两条快捷键**都用 `on_shortcut()` 各挂各的 handler**，不用 `with_handler` 的全局 handler ——
+/// 原因见 `main()` 里注册插件那段的注释：全局 handler 对**所有**快捷键都会再触发一次，
+/// 叠在一起会导致「按最小化键顺带触发一次读取」。
+///
+/// 这样还有一个好处：不需要比较 `Shortcut` 的相等性去判断"刚按的是哪个键"。
+/// 那个比较不可靠 —— 注册时构造的对象和回调里拿到的对象未必能直接比。
+fn register_shortcuts(app: &AppHandle, cfg: &config::Config) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all().ok();
+
+    let read = parse_shortcut(&cfg.hotkey)
+        .map_err(|err| format!("读取快捷键「{}」无效：{err}", cfg.hotkey))?;
+    gs.on_shortcut(read, |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            trigger_read(app);
+        }
+    })
+    .map_err(|err| format!("「{}」注册失败，可能已被别的程序占用：{err}", cfg.hotkey))?;
+
+    if let Some(spec) = cfg.minimize_spec() {
+        let shortcut = parse_shortcut(spec)
+            .map_err(|err| format!("最小化/还原快捷键「{spec}」无效：{err}"))?;
+        gs.on_shortcut(shortcut, |_app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                toggle_editors();
+            }
+        })
+        .map_err(|err| format!("「{spec}」注册失败，可能已被别的程序占用：{err}"))?;
+    }
+
+    Ok(())
 }
 
 /// 把 `Ctrl+Shift+A` 这样的写法解析成快捷键对象。
@@ -299,12 +388,19 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let pick = MenuItem::with_id(app, "pick", "读取当前选中文本", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let open_dir = MenuItem::with_id(app, "open_dir", "打开保存目录", true, None::<&str>)?;
+    let clear = MenuItem::with_id(
+        app,
+        "clear_editors",
+        "最小化/还原编辑器（截图前清场）",
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
-        &[&pick, &settings, &open_dir, &separator, &quit],
+        &[&pick, &settings, &open_dir, &separator, &clear, &quit],
     )?;
 
     let mut builder = TrayIconBuilder::with_id("text-snap-tray")
@@ -353,6 +449,9 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
                 log_line(&format!("打开目录 {} 失败：{err}", dir.display()));
             }
         }
+
+        // 切换式：有窗口开着就收起来，全收起来了就还原
+        "clear_editors" => toggle_editors(),
 
         "quit" => app.exit(0),
         _ => {}
@@ -598,6 +697,10 @@ fn last_selection(state: tauri::State<'_, AppState>) -> Option<serde_json::Value
 #[derive(serde::Serialize, Clone)]
 struct UiInfo {
     hotkey: String,
+    /// 最小化/还原编辑器的快捷键。空串 = 未设置（不注册）
+    minimize_hotkey: String,
+    /// 启动时是否发系统通知
+    show_startup_toast: bool,
     /// 实际生效的保存目录（绝对路径）
     save_dir: String,
     /// 配置文件里写的原始值，空串 = 用默认目录。设置页的输入框显示这个，
@@ -616,6 +719,8 @@ impl UiInfo {
         let raw = cfg.save_dir.clone().unwrap_or_default();
         Self {
             hotkey: cfg.hotkey.clone(),
+            minimize_hotkey: cfg.minimize_spec().unwrap_or_default().to_string(),
+            show_startup_toast: cfg.show_startup_toast,
             save_dir: dir.to_string_lossy().into_owned(),
             save_dir_raw: raw.clone(),
             save_dir_custom: !raw.trim().is_empty(),
@@ -646,25 +751,21 @@ fn apply_settings(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     hotkey: String,
+    minimize_hotkey: String,
     save_dir: String,
+    show_startup_toast: bool,
 ) -> Result<UiInfo, String> {
-    let hotkey = hotkey.trim().to_string();
-    let new_shortcut = parse_shortcut(&hotkey).map_err(|err| err.to_string())?;
-
     let mut cfg = current_config(&app);
     let previous = cfg.clone();
 
-    let old_shortcut = parse_shortcut(&cfg.hotkey).ok();
-    app.global_shortcut().unregister_all().ok();
-    if let Err(err) = app.global_shortcut().register(new_shortcut) {
-        // 注册失败就把旧的装回去，别让用户两头落空
-        if let Some(old) = old_shortcut {
-            let _ = app.global_shortcut().register(old);
-        }
-        return Err(format!("「{hotkey}」注册失败，可能已被别的程序占用：{err}"));
-    }
-
-    cfg.hotkey = hotkey;
+    cfg.hotkey = hotkey.trim().to_string();
+    let minimize = minimize_hotkey.trim();
+    cfg.minimize_hotkey = if minimize.is_empty() {
+        None
+    } else {
+        Some(minimize.to_string())
+    };
+    cfg.show_startup_toast = show_startup_toast;
     let dir = save_dir.trim();
     cfg.save_dir = if dir.is_empty() {
         None
@@ -672,12 +773,25 @@ fn apply_settings(
         Some(dir.to_string())
     };
 
-    if let Err(err) = config::save(&cfg) {
-        // 落盘失败也回滚快捷键，保持一致
-        app.global_shortcut().unregister_all().ok();
-        if let Some(old) = parse_shortcut(&previous.hotkey).ok() {
-            let _ = app.global_shortcut().register(old);
+    // 校验：两条快捷键不能是同一个 —— 不拦的话，第二条注册会失败，
+    // 而报错只说"已被别的程序占用"，用户根本想不到是和自己冲突。
+    if let Some(min_spec) = cfg.minimize_spec() {
+        if min_spec.eq_ignore_ascii_case(&cfg.hotkey) {
+            return Err(
+                "「读取选中文本」和「最小化/还原编辑器」不能使用同一个快捷键".to_string(),
+            );
         }
+    }
+
+    // 先换快捷键：任何一步失败都整体回滚，别让用户两头落空
+    if let Err(err) = register_shortcuts(&app, &cfg) {
+        let _ = register_shortcuts(&app, &previous);
+        return Err(err);
+    }
+
+    if let Err(err) = config::save(&cfg) {
+        // 落盘失败也回滚快捷键，保持「配置文件 = 实际行为」
+        let _ = register_shortcuts(&app, &previous);
         return Err(format!("写配置文件失败：{err}"));
     }
 
@@ -685,9 +799,11 @@ fn apply_settings(
         *guard = cfg.clone();
     }
     log_line(&format!(
-        "设置已更新：快捷键 [{}]，保存目录 [{}]",
+        "设置已更新：读取 [{}]，最小化/还原 [{}]，保存目录 [{}]，启动提示 [{}]",
         cfg.hotkey,
-        cfg.save_dir.as_deref().unwrap_or("<默认>")
+        cfg.minimize_spec().unwrap_or("<未设置>"),
+        cfg.save_dir.as_deref().unwrap_or("<默认>"),
+        if cfg.show_startup_toast { "开" } else { "关" }
     ));
 
     let info = UiInfo::build(&app, &cfg);

@@ -11,18 +11,36 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// 全局快捷键。写法：`Ctrl+Shift+A`、`Alt+Q`、`Ctrl+Alt+F12`、`Ctrl+Shift+Space`
+    /// 读取选中文本的全局快捷键。写法：`Ctrl+Shift+A`、`Alt+Q`、`Ctrl+Alt+F12`
     pub hotkey: String,
+    /// 「最小化/还原编辑器」的全局快捷键。**空 = 不注册**（只用托盘菜单）
+    pub minimize_hotkey: Option<String>,
     /// 保存目录。留空表示用「文档\text-snap」
     pub save_dir: Option<String>,
+    /// 启动时发一条系统通知，提示程序已在后台运行
+    pub show_startup_toast: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Ctrl+Shift+A".to_string(),
+            // 注意：Ctrl+Shift+D 是 VS Code 默认的「运行和调试」。
+            // 本程序注册的是**全局**热键，会把它抢走 —— 用户可以到设置里改成别的。
+            minimize_hotkey: Some("Ctrl+Shift+D".to_string()),
             save_dir: None,
+            show_startup_toast: true,
         }
+    }
+}
+
+impl Config {
+    /// 去掉空白后的「最小化/还原」快捷键；为空表示不注册。
+    pub fn minimize_spec(&self) -> Option<&str> {
+        self.minimize_hotkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|spec| !spec.is_empty())
     }
 }
 

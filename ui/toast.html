@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>text-snap 通知</title>
+  <style>
+    :root {
+      --bg: #fbfbfd;
+      --line: #e3e6ec;
+      --text: #1b1f27;
+      --muted: #6b7280;
+      --close: #8a8f98;
+      --accent: #1d4ed8;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: transparent;
+      font: 13px/1.55 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      overflow: hidden;
+      user-select: none;
+      cursor: default;
+    }
+
+    /* 仿 Windows 11 通知卡片 */
+    .toast {
+      height: 100%;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px 13px;
+      box-shadow: 0 6px 22px rgba(15, 23, 42, .14);
+      display: flex;
+      flex-direction: column;
+      animation: slideIn .26s ease-out both;
+    }
+
+    .toast.fading { animation: fadeOut .5s ease-in forwards; }
+
+    @keyframes slideIn {
+      from { transform: translateX(42px); opacity: 0; }
+      to   { transform: none; opacity: 1; }
+    }
+
+    @keyframes fadeOut {
+      to { transform: translateX(26px); opacity: 0; }
+    }
+
+    /* 顶行：应用图标 + 应用名 + 关闭按钮 */
+    .head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 9px;
+    }
+
+    .head img { width: 16px; height: 16px; display: block; }
+
+    .head .app { font-size: 12px; color: var(--muted); }
+
+    .head button {
+      margin-left: auto;
+      border: 0;
+      background: transparent;
+      color: var(--close);
+      font: 15px/1 "Segoe UI Symbol", sans-serif;
+      padding: 2px 6px;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .head button:hover { background: #eceef2; color: var(--text); }
+
+    /* 正文 */
+    .title { font-size: 13.5px; font-weight: 600; margin: 0 0 3px; }
+
+    .body { font-size: 12.5px; color: var(--text); margin: 0; }
+
+    .body b {
+      font: 600 12px/1 "Cascadia Mono", "Consolas", monospace;
+      background: #eef2ff;
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="toast" id="toast">
+    <div class="head">
+      <img src="icon.png" alt="" />
+      <span class="app" id="app-name">text-snap 划词助手</span>
+      <button id="close" title="关闭">✕</button>
+    </div>
+    <p class="title" id="title">已在后台运行</p>
+    <p class="body" id="body">按 Ctrl+Shift+A 读取选中文本，右键托盘图标打开菜单。</p>
+  </div>
+
+  <script>
+    (function () {
+      const tauri = window.__TAURI__;
+      const invoke = tauri ? tauri.core.invoke : null;
+      const toast = document.getElementById("toast");
+      let fading = false;
+
+      // 淡出：和后端的 5 秒硬隐藏配合，动画先 0.5s 开始播
+      function startFade() {
+        if (fading) return;
+        fading = true;
+        toast.classList.add("fading");
+      }
+      setTimeout(startFade, 4400);
+
+      // 关闭按钮：让后端把窗口收起来
+      document.getElementById("close").addEventListener("click", function () {
+        if (invoke) invoke("hide_toast").catch(function () {});
+        startFade();
+      });
+
+      // 文案由后端推送（快捷键可配置，写死会过期）
+      // 先转义再做快捷键加粗 —— body 里含配置文件里的快捷键，不能直接 innerHTML
+      function escapeHtml(s) {
+        return s.replace(/[&<>"]/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+        });
+      }
+
+      if (tauri && tauri.event && tauri.event.listen) {
+        tauri.event.listen("toast-show", function (event) {
+          const data = event.payload || {};
+          if (data.app_name) document.getElementById("app-name").textContent = data.app_name;
+          if (data.title) document.getElementById("title").textContent = data.title;
+          if (data.body) {
+            document.getElementById("body").innerHTML =
+              escapeHtml(data.body).replace(
+                /([A-Za-z][A-Za-z0-9]*(?:\+[A-Za-z0-9]+)+)/g,
+                "<b>$1</b>"
+              );
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+
+</html>
