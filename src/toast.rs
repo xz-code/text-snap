@@ -47,12 +47,13 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, TOAST_LABEL, WebviewUrl::App("toast.html".into()))
         .title("text-snap 通知")
         .decorations(false) // 无边框：自己画圆角和排版
+        .transparent(true) // 窗口透明 —— 没有它，WebView2 的白底会在卡片淡出后露成一个白框
         .always_on_top(true) // 置顶，不被别的窗口盖住
         .skip_taskbar(true) // 不进任务栏，也不在 Alt+Tab 里出现
         .focusable(false) // 不抢焦点 —— 截图时弹它不能把焦点从浏览器拿走
         .focused(false) // 创建时也不获取焦点
         .resizable(false)
-        .shadow(false) // 阴影交给 CSS 边框和圆角，系统阴影在无边框窗口上会带一圈黑边
+        .shadow(false) // 透明窗口必须关掉系统阴影，否则会带一圈黑边
         .inner_size(WIDTH, HEIGHT)
         .visible(false) // 先藏起来，定位好再显示
         .build()?;
