@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, ShowWindow,
-    SW_MINIMIZE, SW_RESTORE,
+    SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
 };
 
 /// 目标进程名，小写比较。
@@ -84,10 +84,12 @@ pub fn toggle() -> ToggleResult {
 
     if showing > 0 {
         for hwnd in &handles {
-            // ShowWindow 的返回值表示"之前是否可见"，对提权窗口被 UIPI 拦下时也不报错，
-            // 所以成败只能靠下面的状态复核
+            // **必须用 SW_SHOWMINNOACTIVE 而不是 SW_MINIMIZE。**
+            // SW_MINIMIZE 的文档行为是"最小化并激活 z 序里的下一个窗口"——
+            // 两个编辑器接连最小化时前台会易主一次，视觉上就是"闪一下"。
+            // NOACTIVE 变体不动前台：当前正在用的窗口（比如要截图的浏览器）保持不动。
             unsafe {
-                ShowWindow(*hwnd, SW_MINIMIZE);
+                ShowWindow(*hwnd, SW_SHOWMINNOACTIVE);
             }
         }
         let failed = handles
@@ -101,10 +103,7 @@ pub fn toggle() -> ToggleResult {
         }
     } else {
         for hwnd in &handles {
-            // SW_RESTORE 会把窗口还原到最小化之前的位置和大小
-            unsafe {
-                ShowWindow(*hwnd, SW_RESTORE);
-            }
+            restore_no_activate(*hwnd);
         }
         let failed = handles
             .iter()
@@ -115,6 +114,30 @@ pub fn toggle() -> ToggleResult {
             count: handles.len(),
             failed,
         }
+    }
+}
+
+/// 还原窗口到**它被最小化之前的状态**，且不抢前台。
+///
+/// 这里踩过两个坑，都是探针实测出来的，别再改回去：
+///
+/// **坑①：不能用 `SetWindowPlacement(SW_SHOWNOACTIVATE)`。**
+/// 它确实不抢前台，但它会照 `rcNormalPosition` 摆放窗口 ——
+/// 最大化状态直接丢掉，还原出来全是普通窗口。
+///
+/// **坑②：不能用 `SW_SHOWMAXIMIZED`。** 状态是对的，但它的文档原文就是
+/// "Activates the window"，多个最大化窗口接连还原时会互相抢前台 ⇒ 闪一下。
+///
+/// **正解是 `ShowWindow(SW_SHOWNOACTIVATE)`**：
+///   · 它走的是系统的"从最小化还原"流程，会尊重
+///     `WPF_RESTORETOMAXIMIZED`（系统记的"最小化前是最大化"）⇒ 状态正确（实测 3/3）
+///   · 文档语义是 "similar to SW_SHOWNORMAL, except that the window is **not activated**"
+///     ⇒ 不抢前台
+///
+/// 一个调用同时满足两个要求，所以之前那套 Get/SetWindowPlacement 全都不要了。
+fn restore_no_activate(hwnd: HWND) {
+    unsafe {
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
 }
 
