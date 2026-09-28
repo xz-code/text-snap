@@ -202,11 +202,20 @@
     <div>
       <div class="label" style="margin-bottom: 8px;">启动</div>
       <div class="grid">
+        <div class="k">开机自启:</div>
+        <label class="check">
+          <input type="checkbox" id="autostart" />
+          <span>登录 Windows 后自动在后台运行</span>
+        </label>
+
         <div class="k">启动提示:</div>
         <label class="check">
           <input type="checkbox" id="toast" />
           <span>每次启动时发一条系统通知，提示程序已在后台运行</span>
         </label>
+      </div>
+      <div class="path-note" style="margin-top: 6px;">
+        写入当前用户的启动项，不需要管理员权限；也可以在「任务管理器 → 启动应用」里查看。
       </div>
     </div>
   </main>
@@ -372,6 +381,7 @@
         $('hk-read').classList.toggle('empty', !info.hotkey);
         $('hk-min').classList.toggle('empty', !info.minimize_hotkey);
         $('toast').checked = !!info.show_startup_toast;
+        $('autostart').checked = !!info.autostart;
         renderDir(info);
       }
 
@@ -413,6 +423,7 @@
             minimizeHotkey: minValue(),
             saveDir: $('dir').value,
             showStartupToast: $('toast').checked,
+            autostart: $('autostart').checked,
           });
           apply(info);
           setStatus('已保存并生效', 'ok');

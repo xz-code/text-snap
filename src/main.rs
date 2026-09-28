@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod config;
 mod minimize;
 mod selection;
@@ -478,8 +479,9 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
 
     WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
         .title("text-snap 设置")
-        .inner_size(540.0, 400.0)
-        .min_inner_size(480.0, 360.0)
+        // 高度比初版高 60：「启动」组多了「开机自启」一行，不留白就得滚
+        .inner_size(540.0, 460.0)
+        .min_inner_size(480.0, 400.0)
         .resizable(true)
         .center()
         .build()?;
@@ -701,6 +703,11 @@ struct UiInfo {
     minimize_hotkey: String,
     /// 启动时是否发系统通知
     show_startup_toast: bool,
+    /// 是否已开启开机自启。
+    ///
+    /// **真值在注册表里，不在 config.json 里** —— 每次现读 `HKCU` 那条 `Run` 值，
+    /// 配置文件里不留副本，从根上避免"配置说开、系统说关"的漂移。
+    autostart: bool,
     /// 实际生效的保存目录（绝对路径）
     save_dir: String,
     /// 配置文件里写的原始值，空串 = 用默认目录。设置页的输入框显示这个，
@@ -721,6 +728,7 @@ impl UiInfo {
             hotkey: cfg.hotkey.clone(),
             minimize_hotkey: cfg.minimize_spec().unwrap_or_default().to_string(),
             show_startup_toast: cfg.show_startup_toast,
+            autostart: autostart::RunEntry::app().is_enabled(),
             save_dir: dir.to_string_lossy().into_owned(),
             save_dir_raw: raw.clone(),
             save_dir_custom: !raw.trim().is_empty(),
@@ -741,11 +749,17 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     show_settings(&app).map_err(|err| format!("打开设置窗口失败：{err}"))
 }
 
-/// 保存设置：校验 → 换快捷键 → 落盘。
+/// 保存设置：校验 → 换开机自启 → 换快捷键 → 落盘。
+///
+/// 三步里任何一步失败都**整体回滚**，别让用户落到"一半生效"的状态：
+/// 自启已经写进注册表了却因为快捷键被占用而报错，会让人完全摸不着头脑。
 ///
 /// 快捷键切换用的是「先全摘、再注册、失败回滚」的顺序：
 /// 先注册新的再注销旧的看起来更优雅，但注册同一个键会被拒，
 /// 判断"新旧是否同一个键"又要依赖 Shortcut 的相等性，不如这样稳。
+///
+/// 开机自启只在**状态真的变了**时才写注册表：每次保存都无条件重写的话，
+/// 一旦注册表写入被安全软件拦下，连"只改快捷键"这种保存都会失败。
 #[tauri::command]
 fn apply_settings(
     app: AppHandle,
@@ -754,6 +768,7 @@ fn apply_settings(
     minimize_hotkey: String,
     save_dir: String,
     show_startup_toast: bool,
+    autostart: bool,
 ) -> Result<UiInfo, String> {
     let mut cfg = current_config(&app);
     let previous = cfg.clone();
@@ -783,15 +798,52 @@ fn apply_settings(
         }
     }
 
-    // 先换快捷键：任何一步失败都整体回滚，别让用户两头落空
+    // ① 开机自启：写 / 删 `HKCU\...\Run` 里的那条值
+    let run_entry = autostart::RunEntry::app();
+    let autostart_was = run_entry.is_enabled();
+    let autostart_changed = autostart != autostart_was;
+
+    if autostart_changed {
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("取当前程序路径失败，开机自启未改动：{err}"))?;
+        let result = if autostart {
+            run_entry.enable(&autostart::autostart_command(&exe))
+        } else {
+            run_entry.disable()
+        };
+        // 到这一步其它设置都还没落地，直接返回即可，不用回滚什么
+        if let Err(err) = result {
+            return Err(format!(
+                "开机自启设置失败：{err}（安全软件可能拦下了对启动项的修改）"
+            ));
+        }
+    }
+
+    // 把自启恢复原状。后两步失败时调用。
+    let rollback_autostart = || {
+        if autostart_changed {
+            let _ = if autostart_was {
+                let command = std::env::current_exe()
+                    .map(|exe| autostart::autostart_command(&exe))
+                    .unwrap_or_default();
+                run_entry.enable(&command)
+            } else {
+                run_entry.disable()
+            };
+        }
+    };
+
+    // ② 先换快捷键：任何一步失败都整体回滚，别让用户两头落空
     if let Err(err) = register_shortcuts(&app, &cfg) {
         let _ = register_shortcuts(&app, &previous);
+        rollback_autostart();
         return Err(err);
     }
 
+    // ③ 落盘。失败也回滚，保持「配置文件 = 实际行为」
     if let Err(err) = config::save(&cfg) {
-        // 落盘失败也回滚快捷键，保持「配置文件 = 实际行为」
         let _ = register_shortcuts(&app, &previous);
+        rollback_autostart();
         return Err(format!("写配置文件失败：{err}"));
     }
 
@@ -799,11 +851,12 @@ fn apply_settings(
         *guard = cfg.clone();
     }
     log_line(&format!(
-        "设置已更新：读取 [{}]，最小化/还原 [{}]，保存目录 [{}]，启动提示 [{}]",
+        "设置已更新：读取 [{}]，最小化/还原 [{}]，保存目录 [{}]，启动提示 [{}]，开机自启 [{}]",
         cfg.hotkey,
         cfg.minimize_spec().unwrap_or("<未设置>"),
         cfg.save_dir.as_deref().unwrap_or("<默认>"),
-        if cfg.show_startup_toast { "开" } else { "关" }
+        if cfg.show_startup_toast { "开" } else { "关" },
+        if autostart { "开" } else { "关" }
     ));
 
     let info = UiInfo::build(&app, &cfg);
