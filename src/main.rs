@@ -58,8 +58,8 @@ const FOCUS_GRACE_MS: u64 = 300;
 
 struct AppState {
     config: Mutex<config::Config>,
-    /// 往 UIA 工作线程投递一次「读取」请求
-    reader_tx: Sender<()>,
+    /// 往 UIA 工作线程投递一次「读取」请求，附带是谁触发的
+    reader_tx: Sender<Trigger>,
     /// 弹窗最近一次展示的时间戳（毫秒）
     shown_at: AtomicU64,
     /// 最后一次读取结果，供前端补拉
@@ -135,13 +135,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load();
 
     log_line(&format!(
-        "── 启动 ──  配置 {}  快捷键 {}",
+        "── 启动 ──  配置 {}  快捷键 {}  按键弹窗 {}",
         config::path().display(),
-        cfg.hotkey
+        cfg.hotkey,
+        if cfg.popup_on_hotkey { "开" } else { "关（静默模式）" }
     ));
 
     // ① UIA 读取线程：先建好，托盘和快捷键都要往它投递
-    let (reader_tx, reader_rx) = mpsc::channel::<()>();
+    let (reader_tx, reader_rx) = mpsc::channel::<Trigger>();
     spawn_reader(handle.clone(), reader_rx);
 
     app.manage(AppState {
@@ -203,10 +204,23 @@ fn hide_toast(app: AppHandle) {
 
 // ─────────────────────── 全局快捷键 ───────────────────────
 
+/// 这一次读取是谁发起的。
+///
+/// 静默模式（`config.popup_on_hotkey == false`）**只拦快捷键**：
+/// 托盘左键单击和托盘菜单「读取选中文本」都是用户主动去点图标，不弹窗就毫无反馈，
+/// 所以它们永远按「弹窗」处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// 全局快捷键
+    Hotkey,
+    /// 托盘图标左键 / 托盘菜单
+    Tray,
+}
+
 /// 往工作线程投递一次读取请求。
-fn trigger_read(app: &AppHandle) {
+fn trigger_read(app: &AppHandle, source: Trigger) {
     if let Some(state) = app.try_state::<AppState>() {
-        if state.reader_tx.send(()).is_err() {
+        if state.reader_tx.send(source).is_err() {
             log_line("UIA 工作线程已退出，读取请求被丢弃");
         }
     }
@@ -262,7 +276,7 @@ fn register_shortcuts(app: &AppHandle, cfg: &config::Config) -> Result<(), Strin
         .map_err(|err| format!("读取快捷键「{}」无效：{err}", cfg.hotkey))?;
     gs.on_shortcut(read, |app, _shortcut, event| {
         if event.state() == ShortcutState::Pressed {
-            trigger_read(app);
+            trigger_read(app, Trigger::Hotkey);
         }
     })
     .map_err(|err| format!("「{}」注册失败，可能已被别的程序占用：{err}", cfg.hotkey))?;
@@ -427,13 +441,13 @@ fn on_tray_icon(tray: &TrayIcon, event: TrayIconEvent) {
         ..
     } = event
     {
-        trigger_read(tray.app_handle());
+        trigger_read(tray.app_handle(), Trigger::Tray);
     }
 }
 
 fn on_menu(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
-        "pick" => trigger_read(app),
+        "pick" => trigger_read(app, Trigger::Tray),
 
         "settings" => {
             if let Err(err) = show_settings(app) {
@@ -479,8 +493,8 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
 
     WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
         .title("text-snap 设置")
-        // 高度比初版高 60：「启动」组多了「开机自启」一行，不留白就得滚
-        .inner_size(540.0, 460.0)
+        // 高度从初版的 400 一路加到 500：多了「开机自启」和「按键弹窗」两组，不留白就得滚
+        .inner_size(540.0, 500.0)
         .min_inner_size(480.0, 400.0)
         .resizable(true)
         .center()
@@ -583,11 +597,37 @@ fn show_popup_with<T: serde::Serialize>(
     payload: T,
     clipboard_text: Option<String>,
 ) {
+    let frame = publish_selection(app, kind, payload, clipboard_text);
+
     let Some(window) = app.get_webview_window(WIN_LABEL) else {
         log_line("找不到弹窗窗口");
         return;
     };
 
+    if let Err(err) = window.emit(EVT_UPDATE, frame) {
+        log_line(&format!("向前端推送内容失败：{err}"));
+    }
+
+    place_near_cursor(&window);
+    let _ = window.show();
+
+    if let Some(state) = app.try_state::<AppState>() {
+        state.shown_at.store(now_ms(), Ordering::Relaxed);
+    }
+    let _ = window.set_focus();
+}
+
+/// 「写剪贴板 → 存下最后一次结果 → 组织推送帧」，只做后台动作，**不碰窗口**。
+///
+/// 静默模式要的就是这一段：复制照常发生，但既不显示也不刷新弹窗。
+/// 抽出来以后弹窗路径（`show_popup_with`）和静默路径共用同一份逻辑，
+/// 不会出现「静默模式不复制」这类分叉。
+fn publish_selection<T: serde::Serialize>(
+    app: &AppHandle,
+    kind: &str,
+    payload: T,
+    clipboard_text: Option<String>,
+) -> serde_json::Value {
     let mut auto_copied = false;
     if let Some(text) = clipboard_text {
         match write_clipboard(app, &text) {
@@ -606,38 +646,34 @@ fn show_popup_with<T: serde::Serialize>(
             *slot = Some(frame.clone());
         }
     }
-
-    if let Err(err) = window.emit(EVT_UPDATE, frame) {
-        log_line(&format!("向前端推送内容失败：{err}"));
-    }
-
-    place_near_cursor(&window);
-    let _ = window.show();
-
-    if let Some(state) = app.try_state::<AppState>() {
-        state.shown_at.store(now_ms(), Ordering::Relaxed);
-    }
-    let _ = window.set_focus();
+    frame
 }
 
 // ───────────────────── UIA 读取工作线程 ─────────────────────
 
 /// UIA 调用会阻塞几十到几百毫秒，绝不能放在快捷键回调或 Tauri 事件循环线程上。
 /// 这里开一条专用线程：UIA 客户端只创建一次反复用，按需读取。
-fn spawn_reader(app: AppHandle, rx: Receiver<()>) {
+fn spawn_reader(app: AppHandle, rx: Receiver<Trigger>) {
     let spawned = std::thread::Builder::new()
         .name("text-snap-uia".to_string())
         .spawn(move || {
             // 必须在工作线程里创建：UIAutomation::new() 会在这个线程上初始化 COM(MTA)
             let mut reader = selection::Reader::new();
 
-            while rx.recv().is_ok() {
+            while let Ok(source) = rx.recv() {
+                // 静默模式只对快捷键生效，而且每次都现读配置 ——
+                // 保存设置后立刻按新行为走，不用重启程序。
+                let silent = source == Trigger::Hotkey && !current_config(&app).popup_on_hotkey;
+
                 let Some(window) = app.get_webview_window(WIN_LABEL) else {
                     continue;
                 };
 
                 // 弹窗已经开着 → 这一次按键理解为「收起」
-                if window.is_visible().unwrap_or(false) {
+                //
+                // 静默模式**不承担这个职责**：按快捷键只做读取+复制，窗口留给它自己失焦隐藏，
+                // 免得用户正看着内容、按一下快捷键却把窗口收了。
+                if window.is_visible().unwrap_or(false) && !silent {
                     let _ = window.hide();
                     continue;
                 }
@@ -645,16 +681,30 @@ fn spawn_reader(app: AppHandle, rx: Receiver<()>) {
                 match reader.read() {
                     Ok(snapshot) => {
                         log_line(&format!(
-                            "读取成功：{} / {} 字符",
+                            "读取成功{}：{} / {} 字符",
+                            if silent { "（静默模式，不弹窗）" } else { "" },
                             snapshot.process,
                             snapshot.text.chars().count()
                         ));
                         let clipboard_text = snapshot.text.clone();
-                        show_popup_with(&app, "ready", snapshot, Some(clipboard_text));
+                        if silent {
+                            // 只写剪贴板 + 存结果，窗口一动不动
+                            publish_selection(&app, "ready", snapshot, Some(clipboard_text));
+                        } else {
+                            show_popup_with(&app, "ready", snapshot, Some(clipboard_text));
+                        }
                     }
                     Err(failure) => {
-                        log_line(&format!("读取失败：{}", failure.message));
-                        show_popup_with(&app, "failed", failure, None);
+                        log_line(&format!(
+                            "读取失败{}：{}",
+                            if silent { "（静默模式，只记日志）" } else { "" },
+                            failure.message
+                        ));
+                        // 静默模式下连失败也不提示 —— 用户要的是「按一下、复制好、别打扰」，
+                        // 通知同样是打扰。失败原因只留在日志里，排查时去翻 text-snap.log。
+                        if !silent {
+                            show_popup_with(&app, "failed", failure, None);
+                        }
                     }
                 }
             }
@@ -703,6 +753,8 @@ struct UiInfo {
     minimize_hotkey: String,
     /// 启动时是否发系统通知
     show_startup_toast: bool,
+    /// 按快捷键后是否弹窗。false = 静默模式（只复制到剪贴板，成败都不提示）
+    popup_on_hotkey: bool,
     /// 是否已开启开机自启。
     ///
     /// **真值在注册表里，不在 config.json 里** —— 每次现读 `HKCU` 那条 `Run` 值，
@@ -728,6 +780,7 @@ impl UiInfo {
             hotkey: cfg.hotkey.clone(),
             minimize_hotkey: cfg.minimize_spec().unwrap_or_default().to_string(),
             show_startup_toast: cfg.show_startup_toast,
+            popup_on_hotkey: cfg.popup_on_hotkey,
             autostart: autostart::RunEntry::app().is_enabled(),
             save_dir: dir.to_string_lossy().into_owned(),
             save_dir_raw: raw.clone(),
@@ -769,6 +822,8 @@ fn apply_settings(
     save_dir: String,
     show_startup_toast: bool,
     autostart: bool,
+    // 按快捷键后是否弹窗。false = 静默模式，只复制到剪贴板
+    popup_on_hotkey: bool,
 ) -> Result<UiInfo, String> {
     let mut cfg = current_config(&app);
     let previous = cfg.clone();
@@ -781,6 +836,7 @@ fn apply_settings(
         Some(minimize.to_string())
     };
     cfg.show_startup_toast = show_startup_toast;
+    cfg.popup_on_hotkey = popup_on_hotkey;
     let dir = save_dir.trim();
     cfg.save_dir = if dir.is_empty() {
         None
@@ -851,11 +907,12 @@ fn apply_settings(
         *guard = cfg.clone();
     }
     log_line(&format!(
-        "设置已更新：读取 [{}]，最小化/还原 [{}]，保存目录 [{}]，启动提示 [{}]，开机自启 [{}]",
+        "设置已更新：读取 [{}]，最小化/还原 [{}]，保存目录 [{}]，启动提示 [{}]，按键弹窗 [{}]，开机自启 [{}]",
         cfg.hotkey,
         cfg.minimize_spec().unwrap_or("<未设置>"),
         cfg.save_dir.as_deref().unwrap_or("<默认>"),
         if cfg.show_startup_toast { "开" } else { "关" },
+        if cfg.popup_on_hotkey { "开" } else { "关（静默模式）" },
         if autostart { "开" } else { "关" }
     ));
 

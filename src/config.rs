@@ -1,4 +1,4 @@
-//! 配置读写：只有全局快捷键和保存目录两项。
+//! 配置读写：快捷键、保存目录、启动提示、弹窗行为。
 //!
 //! 配置文件位置：`%APPDATA%\text-snap\config.json`，首次运行自动生成。
 //! 手改之后在托盘菜单点「重新加载快捷键配置」即可生效，不用重启。
@@ -19,6 +19,12 @@ pub struct Config {
     pub save_dir: Option<String>,
     /// 启动时发一条系统通知，提示程序已在后台运行
     pub show_startup_toast: bool,
+    /// 按下「读取选中文本」快捷键后是否弹出窗口。
+    ///
+    /// `false` = 静默模式：只在后台读到选中文本并写进剪贴板，不显示窗口，
+    /// 读失败也不提示（原因只写日志）。
+    /// **只影响快捷键**，托盘左键和托盘菜单照旧弹窗。
+    pub popup_on_hotkey: bool,
 }
 
 impl Default for Config {
@@ -30,6 +36,8 @@ impl Default for Config {
             minimize_hotkey: Some("Ctrl+Shift+D".to_string()),
             save_dir: None,
             show_startup_toast: true,
+            // 默认保持原有行为：按快捷键就弹窗
+            popup_on_hotkey: true,
         }
     }
 }
